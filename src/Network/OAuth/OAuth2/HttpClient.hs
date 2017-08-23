@@ -1,5 +1,7 @@
+{-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE FlexibleContexts  #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 -- | A simple http client to request OAuth2 tokens and several utils.
 
@@ -23,7 +25,9 @@ module Network.OAuth.OAuth2.HttpClient (
   parseResponseJSON,
   parseResponseFlexible,
   updateRequestHeaders,
-  setMethod
+  setMethod,
+-- * Classes
+  AccessTokenLike
 ) where
 
 import           Control.Monad                 (liftM)
@@ -43,13 +47,13 @@ import           Network.OAuth.OAuth2.Internal
 --------------------------------------------------
 
 -- | Request (via POST method) "Access Token".
-fetchAccessToken :: Manager                          -- ^ HTTP connection manager
+fetchAccessToken :: (AccessTokenLike a, FromJSON a)
+                   => Manager                          -- ^ HTTP connection manager
                    -> OAuth2                         -- ^ OAuth Data
                    -> BS.ByteString                  -- ^ Authentication code gained after authorization
-                   -> IO (OAuth2Result AccessToken)  -- ^ Access Token
+                   -> IO (OAuth2Result a)  -- ^ Access Token
 fetchAccessToken manager oa code = doFlexiblePostRequest manager oa uri body
                            where (uri, body) = accessTokenUrl oa code
-
 
 -- | Request the "Refresh Token".
 fetchRefreshToken :: Manager                         -- ^ HTTP connection manager.
@@ -79,33 +83,39 @@ doFlexiblePostRequest :: FromJSON a
 doFlexiblePostRequest manager oa uri body = liftM parseResponseFlexible (doSimplePostRequest manager oa uri body)
 
 -- | Conduct post request.
-doSimplePostRequest :: Manager                              -- ^ HTTP connection manager.
-                       -> OAuth2                            -- ^ OAuth options
-                       -> URI                               -- ^ URL
-                       -> PostBody                          -- ^ Request body.
-                       -> IO (OAuth2Result BSL.ByteString)  -- ^ Response as ByteString
+doSimplePostRequest
+  :: Manager                              -- ^ HTTP connection manager.
+  -> OAuth2                            -- ^ OAuth options
+  -> URI                               -- ^ URL
+  -> PostBody                          -- ^ Request body.
+  -> IO (OAuth2Result BSL.ByteString)  -- ^ Response as ByteString
 doSimplePostRequest manager oa url body = liftM handleResponse go
-                                  where go = do
-                                             req <- parseUrl $ BS.unpack url
-                                             let addBasicAuth = applyBasicAuth (oauthClientId oa) (oauthClientSecret oa)
-                                                 req' = (addBasicAuth . updateRequestHeaders Nothing) req
-                                             httpLbs (urlEncodedBody body req') manager
+ where
+  go = do
+    req <- parseUrl $ BS.unpack url
+    let
+      addBasicAuth = applyBasicAuth (oauthClientId oa) (oauthClientSecret oa)
+      req' =
+        (addBasicAuth . updateRequestHeaders (Nothing :: Maybe AccessToken)) req
+        --                                                     ^ Whatever type of Nothing
+    httpLbs (urlEncodedBody body req') manager
 
 --------------------------------------------------
 -- * AUTH requests
 --------------------------------------------------
 
 -- | Conduct GET request and return response as JSON.
-authGetJSON :: FromJSON a
+authGetJSON :: (FromJSON a, AccessTokenLike b)
                  => Manager                      -- ^ HTTP connection manager.
-                 -> AccessToken
+                 -> b
                  -> URI                          -- ^ Full URL
                  -> IO (OAuth2Result a)          -- ^ Response as JSON
 authGetJSON manager t uri = liftM parseResponseJSON $ authGetBS manager t uri
 
 -- | Conduct GET request.
-authGetBS :: Manager                              -- ^ HTTP connection manager.
-             -> AccessToken
+authGetBS :: (AccessTokenLike a)
+             => Manager                              -- ^ HTTP connection manager.
+             -> a
              -> URI                               -- ^ URL
              -> IO (OAuth2Result BSL.ByteString)  -- ^ Response as ByteString
 authGetBS manager token url = do
@@ -114,14 +124,15 @@ authGetBS manager token url = do
   where upReq = updateRequestHeaders (Just token) . setMethod HT.GET
 
 -- | same to 'authGetBS' but set access token to query parameter rather than header
-authGetBS' :: Manager                              -- ^ HTTP connection manager.
-             -> AccessToken
+authGetBS' :: forall a. AccessTokenLike a
+             => Manager                              -- ^ HTTP connection manager.
+             -> a
              -> URI                               -- ^ URL
              -> IO (OAuth2Result BSL.ByteString)  -- ^ Response as ByteString
 authGetBS' manager token url = do
   req <- parseUrl $ BS.unpack $ url `appendAccessToken` token
   authRequest req upReq manager
-  where upReq = updateRequestHeaders Nothing . setMethod HT.GET
+  where upReq = updateRequestHeaders (Nothing :: Maybe a) . setMethod HT.GET
 
 -- | Conduct POST request and return response as JSON.
 authPostJSON :: FromJSON a
@@ -146,8 +157,9 @@ authPostBS manager token url pb = do
         upReq = upHeaders . upBody
 
 -- | Conduct POST request with access token in the request body rather header
-authPostBS' :: Manager                             -- ^ HTTP connection manager.
-             -> AccessToken
+authPostBS' :: forall a. (AccessTokenLike a)
+             => Manager                             -- ^ HTTP connection manager.
+             -> a
              -> URI                               -- ^ URL
              -> PostBody
              -> IO (OAuth2Result BSL.ByteString)  -- ^ Response as ByteString
@@ -155,7 +167,7 @@ authPostBS' manager token url pb = do
   req <- parseUrl $ BS.unpack url
   authRequest req upReq manager
   where upBody = urlEncodedBody (pb ++ accessTokenToParam token)
-        upHeaders = updateRequestHeaders Nothing . setMethod HT.POST
+        upHeaders = updateRequestHeaders (Nothing :: Maybe a) . setMethod HT.POST
         upReq = upHeaders . upBody
 
 -- |Send an HTTP request including the Authorization header with the specified
@@ -214,11 +226,12 @@ parseResponseFlexible r = case parseResponseJSON r of
 --   + userAgennt    : `hoauth2`
 --   + accept        : `application/json`
 --   + authorization : 'Bearer' `xxxxx` if 'AccessToken' provided.
-updateRequestHeaders :: Maybe AccessToken -> Request -> Request
+updateRequestHeaders :: forall a. (AccessTokenLike a)
+                     => Maybe a -> Request -> Request
 updateRequestHeaders t req =
   let extras = [ (HT.hUserAgent, "hoauth2")
                , (HT.hAccept, "application/json") ]
-      bearer = [(HT.hAuthorization, "Bearer " `BS.append` accessToken (fromJust t)) | isJust t]
+      bearer = [(HT.hAuthorization, "Bearer " `BS.append` getAccessToken (fromJust t)) | isJust t]
       headers = bearer ++ extras ++ requestHeaders req
   in
   req { requestHeaders = headers }

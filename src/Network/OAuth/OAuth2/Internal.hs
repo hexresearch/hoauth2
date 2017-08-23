@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ConstrainedClassMethods #-}
 
 {-# OPTIONS_HADDOCK -ignore-exports #-}
 
@@ -30,6 +31,9 @@ data OAuth2 = OAuth2 {
     } deriving (Show, Eq)
 
 
+class FromJSON a => AccessTokenLike a where
+    getAccessToken :: (AccessTokenLike a) => a -> BS.ByteString
+
 -- | The gained Access Token. Use @Data.Aeson.decode@ to
 -- decode string to @AccessToken@.  The @refreshToken@ is
 -- special in some cases,
@@ -41,6 +45,9 @@ data AccessToken = AccessToken {
     , tokenType    :: Maybe BS.ByteString
     , idToken      :: Maybe BS.ByteString
     } deriving (Show)
+
+instance AccessTokenLike AccessToken where
+    getAccessToken = accessToken
 
 -- | Parse JSON data into 'AccessToken'
 instance FromJSON AccessToken where
@@ -123,14 +130,15 @@ appendQueryParam uri q = if "?" `BS.isInfixOf` uri
                          else uri `BS.append` renderSimpleQuery True q
 
 -- | For `GET` method API.
-appendAccessToken :: URI               -- ^ Base URI
-                     -> AccessToken    -- ^ Authorized Access Token
+appendAccessToken :: AccessTokenLike a
+                     => URI               -- ^ Base URI
+                     -> a    -- ^ Authorized Access Token
                      -> URI            -- ^ Combined Result
 appendAccessToken uri t = appendQueryParam uri (accessTokenToParam t)
 
 -- | Create 'QueryParams' with given access token value.
-accessTokenToParam :: AccessToken -> QueryParams
-accessTokenToParam at = [("access_token", accessToken at)]
+accessTokenToParam :: AccessTokenLike a => a -> QueryParams
+accessTokenToParam at = [("access_token", getAccessToken at)]
 
 
 -- | Lift value in the 'Maybe' and abandon 'Nothing'.
